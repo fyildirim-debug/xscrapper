@@ -7,7 +7,7 @@ from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 from urllib.parse import unquote, urlencode
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Path
 from typing import Optional, List
 from datetime import date, datetime
 import uvicorn
@@ -48,12 +48,80 @@ app = FastAPI(
     * Basit arama: `/api/search?q=python`
     * Filtreli arama: `/api/search?q=python&include_filters=images,verified`
     * Tarih aralıklı arama: `/api/search?q=python&since=2024-01-01&until=2024-03-20`
-    * Konum bazlı arama: `/api/search?q=python&near=Istanbul`
     """,
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"message": "Server is ok"}
+
+@app.get("/api/user/{username}",
+         summary="Twitter Kullanıcı Profili",
+         response_description="Kullanıcı profili ve tweet bilgileri")
+async def get_user_profile(
+    username: str = Path(..., 
+                      description="Twitter kullanıcı adı (@işareti olmadan)",
+                      examples=["elonmusk", "BillGates"],
+                      min_length=1),
+    max_tweets: int = Query(0,
+                          description="Getirilecek maksimum tweet sayısı (0: sadece profil bilgileri)",
+                          ge=0,
+                          le=1000)
+):
+    """
+    Twitter kullanıcısının profil bilgilerini ve tweetlerini getirir.
+    
+    ## Parametreler
+    * **username**: Twitter kullanıcı adı (@işareti olmadan) (zorunlu)
+    * **max_tweets**: Getirilecek maksimum tweet sayısı (varsayılan: 0, sadece profil bilgileri)
+    
+    ## Dönüş Değerleri
+    * **profile**: Kullanıcı profil bilgileri
+        * twitter_url: Gerçek Twitter profil URL'i
+        * display_name: Görünen adı
+        * username: Kullanıcı adı (@ile)
+        * stats:
+            * tweets: Tweet sayısı
+            * following: Takip edilen sayısı
+            * followers: Takipçi sayısı
+            * likes: Beğeni sayısı
+            * media: Medya sayısı
+    * **tweets**: Kullanıcının tweetleri (max_tweets > 0 ise)
+        * content: Tweet içeriği
+        * date: Tweet tarihi
+        * stats:
+            * likes: Beğeni sayısı
+            * comments: Yorum sayısı
+            * retweets: Retweet sayısı
+        * media: Tweet'teki medya URL'leri
+        * tweet_link: Tweet'in linki
+    
+    ## Örnek İstekler
+    ```
+    /api/user/elonmusk          # Sadece profil bilgileri
+    /api/user/BillGates?max_tweets=100  # Profil bilgileri ve 100 tweet
+    ```
+    """
+    scraper = TwitterScrapper()
+    
+    try:
+        results = await scraper.get_profile(username, max_tweets)
+        if not results or not results.get("profile_data"):
+            return {
+                "error": "Kullanıcı profili bulunamadı",
+                "message": "Profil bilgileri alınamadı veya kullanıcı mevcut değil"
+            }
+            
+        return results["profile_data"]
+        
+    except Exception as e:
+        return {
+            "error": "Kullanıcı profili alınamadı",
+            "message": str(e)
+        }
 
 class HTMLCache:
     def __init__(self, cache_dir="cache"):
@@ -128,11 +196,15 @@ class TwitterScrapper:
         self.chrome_options.add_argument("--window-size=1920x1080")
         self.chrome_options.add_argument("--no-sandbox")
         self.chrome_options.add_argument("--disable-dev-shm-usage")
-        self.chrome_options.add_argument("--log-level=3")  # Sadece önemli hataları göster
-        self.chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])  # Chrome loglarını kapat
+        self.chrome_options.add_argument("--log-level=3")
+        self.chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        self.chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        self.chrome_options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
+        self.chrome_options.add_experimental_option('useAutomationExtension', False)
 
         self.service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(options=self.chrome_options)
+        self.driver.implicitly_wait(10)  # 10 saniye bekleme süresi
         self.executor = ThreadPoolExecutor(max_workers=4)
         
         # Cache sistemini başlat
@@ -150,7 +222,43 @@ class TwitterScrapper:
 
     @staticmethod
     def stat_cleaner(stat: str) -> int:
-        return int(stat.replace(",", "")) if stat else 0
+        """Sayısal değerleri temizler ve int'e çevirir.
+        Örnek: "1,234" -> 1234
+               "12.3K" -> 12300
+               "1.5M" -> 1500000
+               "2.3B" -> 2300000000
+        """
+        # None veya boş string kontrolü
+        if stat is None or not isinstance(stat, str):
+            return 0
+            
+        # Boş string veya sadece boşluk karakteri kontrolü
+        stat = stat.strip()
+        if not stat:
+            return 0
+            
+        try:
+            # Virgülleri kaldır
+            stat = stat.replace(",", "")
+            
+            # K/M/B formatını kontrol et
+            if "K" in stat.upper():
+                num = float(stat.upper().replace("K", ""))
+                return int(num * 1000)
+            elif "M" in stat.upper():
+                num = float(stat.upper().replace("M", ""))
+                return int(num * 1000000)
+            elif "B" in stat.upper():
+                num = float(stat.upper().replace("B", ""))
+                return int(num * 1000000000)
+            
+            # Sayısal değer kontrolü
+            if not any(c.isdigit() for c in stat):
+                return 0
+                
+            return int(float(stat))
+        except:
+            return 0
 
     @staticmethod
     def convert_nitter_image_to_twitter(nitter_url: str) -> str:
@@ -207,7 +315,7 @@ class TwitterScrapper:
 
         try:
             self.driver.get(base_url)
-            time.sleep(5)
+            time.sleep(10)
             
             # İlk tweet sayısını al
             initial_tweet_count = len(self.driver.find_elements("css selector", ".timeline-item"))
@@ -235,8 +343,7 @@ class TwitterScrapper:
                     # "Load more" içeren linki bul (Load newest değil)
                     load_more = None
                     for link in show_more_links:
-                        href = link.get('href', '')
-                        if "cursor=" in href and "Load newest" not in link.text:
+                        if "Load newest" not in link.text and "cursor=" in link.get('href', ''):
                             load_more = link
                             break
                     
@@ -331,10 +438,14 @@ class TwitterScrapper:
         )
         return await self.extract_search_contents(html)
 
-    async def get_profile(self, username: str) -> object:
+    async def get_profile(self, username: str, max_tweets: int = 50) -> object:
         """Get profile information of a user (async)."""
-        html = await self.run_in_thread(self.profile_html_contents, username)
-        return await self.extract_profile_contents(html)
+        html, stats = await self.run_in_thread(self.profile_html_contents, username, max_tweets)
+        profile_data = await self.extract_profile_contents(html, max_tweets) if html else None
+        return {
+            "stats": stats,
+            "profile_data": profile_data
+        }
 
     async def run_in_thread(self, func, *args, **kwargs):
         """Run blocking functions inside a ThreadPoolExecutor asynchronously."""
@@ -344,63 +455,260 @@ class TwitterScrapper:
             lambda: func(*args, **kwargs)
         )
 
-    def profile_html_contents(self, username: str) -> str | None:
-        """Fetch the profile page HTML using Selenium."""
-        url = f"{DOMAIN}/{username}/search"
+    def profile_html_contents(self, username: str, max_tweets: int = 50) -> tuple[str | None, dict]:
+        """Kullanıcı profil sayfasının HTML içeriğini getirir."""
+        url = f"{DOMAIN}/{self.username_cleaner(username)}"
+        stats = {
+            "total_tweets": 0,
+            "pages_loaded": 1,
+            "requested_tweets": max_tweets
+        }
 
         try:
             self.driver.get(url)
-            time.sleep(5)
-            return self.driver.page_source
+            time.sleep(10)  # Sayfanın yüklenmesi için bekle
+            
+            # Profil bilgilerinin yüklendiğinden emin ol
+            profile_card = self.driver.find_element("css selector", ".profile-card")
+            if not profile_card:
+                raise Exception("Profil bilgileri yüklenemedi")
+            
+            # İlk tweet sayısını al
+            initial_tweet_count = len(self.driver.find_elements("css selector", ".timeline-item"))
+            print(f"Başlangıç tweet sayısı: {initial_tweet_count}")
+            
+            all_tweets = []  # Tüm tweetleri tutacak liste
+            current_html = self.driver.page_source
+            
+            # İlk sayfadaki tweetleri ekle
+            soup = BeautifulSoup(current_html, 'html.parser')
+            tweets = soup.select(".timeline-item")
+            for tweet in tweets:
+                if not "show-more" in tweet.get("class", []):
+                    all_tweets.append(str(tweet))
+            
+            total_tweets = len(all_tweets)
+            page_count = 1
+            
+            # İstenen tweet sayısına ulaşana kadar devam et
+            while total_tweets < max_tweets:
+                try:
+                    # Load more butonunu ve URL'sini bul
+                    show_more_links = soup.select(".show-more a")
+                    
+                    # "Load more" içeren linki bul (Load newest değil)
+                    load_more = None
+                    for link in show_more_links:
+                        if "Load newest" not in link.text and "cursor=" in link.get('href', ''):
+                            load_more = link
+                            break
+                    
+                    if not load_more:
+                        print("Load more linki bulunamadı, mevcut tweetlerle devam ediliyor.")
+                        break
+                        
+                    # Yeni URL'yi oluştur
+                    next_page_url = f"{DOMAIN}{load_more['href']}"
+                    print(f"Sayfa {page_count + 1} yükleniyor: {next_page_url}")
+                    
+                    # Yeni sayfayı yükle
+                    self.driver.get(next_page_url)
+                    time.sleep(3)
+                    
+                    # Yeni HTML'i al
+                    current_html = self.driver.page_source
+                    soup = BeautifulSoup(current_html, 'html.parser')
+                    
+                    # Yeni sayfadaki tweetleri ekle
+                    previous_count = total_tweets
+                    new_tweets = soup.select(".timeline-item")
+                    for tweet in new_tweets:
+                        if not "show-more" in tweet.get("class", []):
+                            all_tweets.append(str(tweet))
+                    
+                    # Toplam tweet sayısını güncelle
+                    total_tweets = len(all_tweets)
+                    print(f"Sayfa {page_count + 1} sonrası toplam tweet sayısı: {total_tweets}")
+                    
+                    # Eğer yeni tweet eklenemediyse dur
+                    if total_tweets <= previous_count:
+                        print("Yeni tweet eklenemedi, mevcut tweetlerle devam ediliyor.")
+                        break
+                    
+                    page_count += 1
+                    
+                except Exception as e:
+                    print(f"Load more error: {e}")
+                    break
+            
+            # Son tweet sayısını göster
+            print(f"Toplam tweet sayısı: {total_tweets}")
+            
+            # Tüm tweetleri tek bir HTML içinde birleştir
+            timeline_html = f"""
+            <div class="profile-card">{str(profile_card.get_attribute('outerHTML'))}</div>
+            <div class="timeline">
+                {"".join(all_tweets)}
+            </div>
+            """
+            
+            # HTML içeriğini kaydet
+            html_file = self.html_cache.save_html(url, timeline_html)
+            
+            # Metadata'yı kaydet
+            stats.update({
+                "total_tweets": total_tweets,
+                "pages_loaded": page_count
+            })
+            self.search_metadata.add_search(
+                query=username,
+                url=url,
+                html_file=html_file,
+                params=stats
+            )
+            
+            return timeline_html, stats
+            
         except Exception as e:
-            print("Error:", e)
+            print(f"Profil sayfası yüklenirken hata: {e}")
+            return None, stats
+
+    async def extract_profile_contents(self, html: str, max_tweets: int = 0) -> object:
+        """Profil detaylarını, tweetleri ve medyayı çıkarır."""
+        if not html:
             return None
-
-    async def extract_profile_contents(self, html: str) -> object:
-        """Extract profile details, tweets, and media from the profile page."""
+            
         soup = BeautifulSoup(html, 'html.parser')
+        
+        # Güvenli element seçimi için yardımcı fonksiyon
+        def safe_select(selector, attr="text", default=""):
+            element = soup.select_one(selector)
+            if not element:
+                return default
+            if attr == "text":
+                return element.text.strip()
+            return element.get(attr, default)
 
-        profile = {
-            "full_name": soup.select_one(".profile-card-fullname").text.strip(),
-            "username": self.username_cleaner(soup.select_one(".profile-card-username").text.strip()),
-            "bio": soup.select_one(".profile-bio p").text.strip() if soup.select_one(".profile-bio p") else "",
-            "location": (soup.select_one(".profile-location span:nth-of-type(2)").text.strip()
-                         if soup.select_one(".profile-location span:nth-of-type(2)") else ""),
-            "join_date": soup.select_one(".profile-joindate span").text.strip().replace("Joined", "").strip(),
-            "tweets": self.stat_cleaner(soup.select_one(".posts .profile-stat-num").text.strip()),
-            "following": self.stat_cleaner(soup.select_one(".following .profile-stat-num").text.strip()),
-            "followers": self.stat_cleaner(soup.select_one(".followers .profile-stat-num").text.strip()),
-            "likes": self.stat_cleaner(soup.select_one(".likes .profile-stat-num").text.strip()),
-            "profile_image": self.convert_nitter_image_to_twitter(DOMAIN + soup.select_one(".profile-card-avatar img")["src"]),
-            "banner_image": (self.convert_nitter_image_to_twitter(DOMAIN + soup.select_one(".profile-banner img")["src"])
-                             if soup.select_one(".profile-banner img") else "")
+        # Profil bilgilerini güvenli şekilde al
+        username = safe_select('.profile-card-username', 'text')
+        twitter_url = f"https://x.com/{username.replace('@', '')}"
+        display_name = safe_select('.profile-card-fullname', 'text')
+        
+        # İstatistikleri al
+        tweets_count = self.stat_cleaner(safe_select('.posts .profile-stat-num', 'text'))
+        following_count = self.stat_cleaner(safe_select('.following .profile-stat-num', 'text'))
+        followers_count = self.stat_cleaner(safe_select('.followers .profile-stat-num', 'text'))
+        likes_count = self.stat_cleaner(safe_select('.likes .profile-stat-num', 'text'))
+        
+        # Profil resmini al
+        profile_image = ""
+        avatar_link = soup.select_one('.profile-card-avatar')
+        if avatar_link:
+            img_src = avatar_link.get('href', '')
+            if img_src:
+                profile_image = self.convert_nitter_image_to_twitter(DOMAIN + img_src)
+        
+        # Medya sayısını al
+        media_count = 0
+        media_text = safe_select('.photo-rail-header a', 'text')
+        if media_text:
+            # "3,380 Photos and videos" formatından sayıyı çıkar
+            try:
+                # Metni temizle ve ilk sayıyı al
+                media_count = self.stat_cleaner(''.join(c for c in media_text.split()[0] if c.isdigit() or c in ',.KMB'))
+            except:
+                media_count = 0
+        
+        profile_info = {
+            "twitter_url": twitter_url,
+            "display_name": display_name,
+            "username": username,
+            "profile_image": profile_image,
+            "stats": {
+                "tweets": tweets_count,
+                "following": following_count,
+                "followers": followers_count,
+                "likes": likes_count,
+                "media": media_count
+            }
         }
+        
+        # max_tweets=0 ise sadece profil bilgilerini döndür
+        if max_tweets == 0:
+            return {"profile": profile_info}
 
         tweets = []
-        for tweet in soup.select(".timeline-item"):
-            tweet_images = [self.convert_nitter_image_to_twitter(DOMAIN + img["src"]) for img in tweet.select(".attachment.image img")]
-
-            retweeted_by = tweet.select_one(".retweet-header div")
-            replying_to = tweet.select_one(".tweet-body .replying-to a")
-
+        seen_tweet_ids = set()  # Tweet ID'lerini takip etmek için set
+        
+        # Timeline'daki tüm tweetleri topla
+        timeline_items = soup.select(".timeline-item")
+        print(f"Bulunan tweet sayısı: {len(timeline_items)}")
+        
+        for tweet in timeline_items:
+            # Show more butonlarını atla
+            if "show-more" in tweet.get("class", []):
+                continue
+                
+            # Tweet linkinden ID'yi çıkar
+            tweet_link = ""
+            tweet_link_element = tweet.select_one(".tweet-link")
+            if tweet_link_element and tweet_link_element.get("href"):
+                tweet_link = tweet_link_element["href"]
+                tweet_id = tweet_link.split('/status/')[1].split('#')[0] if '/status/' in tweet_link else ""
+                
+                # Eğer bu tweet ID'sini daha önce gördüysek, bu tweet'i atla
+                if tweet_id in seen_tweet_ids:
+                    continue
+                    
+                seen_tweet_ids.add(tweet_id)
+                tweet_link = f"https://x.com/{username.replace('@', '')}/status/{tweet_id}"
+            
+            tweet_images = [
+                self.convert_nitter_image_to_twitter(DOMAIN + img["src"]) 
+                for img in tweet.select(".attachment.image img")
+            ]
+            
+            # Tweet istatistiklerini güvenli şekilde al
+            stats = {}
+            for stat_type, icon_class in [("likes", "icon-heart"), ("comments", "icon-comment"), ("retweets", "icon-retweet")]:
+                stat_element = tweet.select_one(f".{icon_class}")
+                if stat_element and stat_element.parent:
+                    stats[stat_type] = self.stat_cleaner(stat_element.parent.text.strip())
+                else:
+                    stats[stat_type] = 0
+            
+            # Tweet içeriğini al
+            content = ""
+            content_element = tweet.select_one(".tweet-content")
+            if content_element:
+                content = content_element.text.strip()
+            
+            # Tweet tarihini al
+            date = ""
+            date_element = tweet.select_one(".tweet-date a")
+            if date_element:
+                date = date_element.text.strip()
+            
             tweet_data = {
-                "content": tweet.select_one(".tweet-content").text.strip() if tweet.select_one(".tweet-content") else "",
-                "date": tweet.select_one(".tweet-date a").text.strip(),
-                "likes": tweet.select_one(".icon-heart").parent.text.strip() if tweet.select_one(".icon-heart") else "0",
-                "comments": tweet.select_one(".icon-comment").parent.text.strip() if tweet.select_one(".icon-comment") else "0",
-                "retweets": tweet.select_one(".icon-retweet").parent.text.strip() if tweet.select_one(".icon-retweet") else "0",
-                "tweet_link": tweet.select_one(".tweet-link")["href"] if tweet.select_one(".tweet-link") else "",
-                "images": tweet_images,
-                "retweeted_by": retweeted_by.text.strip() if retweeted_by else None,
-                "is_retweet": bool(retweeted_by),
-                "is_reply": bool(replying_to),
-                "replying_to": replying_to.text.strip() if replying_to else None,
+                "content": content,
+                "date": date,
+                "stats": stats,
+                "media": tweet_images,
+                "tweet_link": tweet_link
             }
+            
             tweets.append(tweet_data)
+            
+            # İstenen tweet sayısına ulaştıysak döngüyü sonlandır
+            if len(tweets) >= max_tweets:
+                break
 
-        media = [self.convert_nitter_image_to_twitter(DOMAIN + img["src"]) for img in soup.select(".photo-rail-grid a img")]
-
-        return {"profile": profile, "tweets": tweets, "media": media}
+        print(f"Döndürülen tweet sayısı: {len(tweets)}")
+        
+        return {
+            "profile": profile_info,
+            "tweets": tweets
+        }
 
     async def extract_search_contents(self, html: str) -> list:
         """Extract tweet search results from the HTML content."""
