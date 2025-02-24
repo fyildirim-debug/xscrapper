@@ -1,24 +1,79 @@
-Ana Yapı ve Teknolojiler:
-FastAPI framework'ü kullanılarak REST API oluşturulmuş
-Selenium ve BeautifulSoup ile web scraping yapılıyor
-Asenkron programlama için asyncio kullanılmış
-Önbellek sistemi için özel bir cache mekanizması geliştirilmiş
-Temel Özellikler:
-Twitter'da tweet araması yapma
-Kullanıcı profili bilgilerini getirme
-Tweet filtreleme (medya, onaylı hesaplar vb.)
-Tarih aralığına göre arama
-Çoklu dil desteği
-Ana Sınıflar:
-TwitterScrapper: Ana scraping işlemlerini yürütür
-HTMLCache: HTML içeriklerini önbellekleme
-SearchMetadata: Arama verilerini yönetme
-API Endpoints:
-/api/search: Tweet araması
-/api/user/{username}: Kullanıcı profili
-Swagger belgesi için /docs
-Güvenlik ve Optimizasyon:
-Rate limiting
-Hata yönetimi
-Önbellekleme sistemi
-Asenkron işlem yapısı
+# Twitter Data Scraper API
+
+Modern ve güçlü Twitter veri çekme API'si.
+
+## 🚀 Özellikler
+
+* **Gelişmiş Arama Özellikleri**
+  * Tweet araması
+  * Kullanıcı profili analizi
+  * Çoklu filtreleme seçenekleri
+  * Tarih bazlı arama
+
+* **Teknik Altyapı**
+  * FastAPI tabanlı REST API
+  * Selenium web scraping
+  * Asenkron işlem yapısı
+  * Önbellek sistemi
+
+* **Veri Çıktıları**
+  * Tweet içerikleri
+  * Kullanıcı profilleri
+  * Medya içerikleri
+  * İstatistiksel veriler
+
+## 🛠️ Kurulum
+
+```bash
+# Gereksinimleri yükleyin
+pip install -r requirements.txt
+
+# Uygulamayı başlatın
+python main.py
+```
+
+## 📚 API Kullanımı
+
+### Tweet Araması
+```bash
+GET /api/search?q=python&include_filters=images,verified
+```
+
+### Kullanıcı Profili
+```bash
+GET /api/user/{username}?max_tweets=100
+```
+
+## 💡 Örnekler
+
+```python
+# Tweet araması örneği
+response = requests.get(
+    "http://localhost:8000/api/search",
+    params={
+        "q": "python programming",
+        "include_filters": ["verified"],
+        "max_tweets": 50
+    }
+)
+```
+
+## 📋 Gereksinimler
+
+* Python 3.8+
+* FastAPI
+* Selenium
+* BeautifulSoup4
+* Chrome WebDriver
+
+## 🤝 Katkıda Bulunma
+
+1. Fork edin
+2. Feature branch oluşturun (`git checkout -b feature/amazing`)
+3. Değişikliklerinizi commit edin (`git commit -m 'Add amazing feature'`)
+4. Branch'inizi push edin (`git push origin feature/amazing`)
+5. Pull Request açın
+
+## 📝 Lisans
+
+MIT License - daha fazla detay için [LICENSE](LICENSE) dosyasına bakın.
