@@ -74,6 +74,3 @@ response = requests.get(
 4. Branch'inizi push edin (`git push origin feature/amazing`)
 5. Pull Request açın
 
-## 📝 Lisans
-
-MIT License - daha fazla detay için [LICENSE](LICENSE) dosyasına bakın.
